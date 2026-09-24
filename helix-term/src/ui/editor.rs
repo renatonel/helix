@@ -1641,7 +1641,11 @@ impl Component for EditorView {
             Self::render_bufferline(cx.editor, area.with_height(1), surface);
         }
 
+        let zoomed = cx.editor.tree.is_zoomed();
         for (view, is_focused) in cx.editor.tree.views() {
+            if zoomed && !is_focused {
+                continue;
+            }
             let doc = cx.editor.document(view.doc).unwrap();
             self.render_view(cx.editor, doc, view, area, surface, is_focused);
         }

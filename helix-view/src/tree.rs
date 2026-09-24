@@ -8,7 +8,9 @@ pub struct Tree {
     root: ViewId,
     // (container, index inside the container)
     pub focus: ViewId,
-    // fullscreen: bool,
+    // Whether the focused view is currently zoomed (maximized) to fill the
+    // whole tree area, hiding all other views.
+    zoomed: bool,
     area: Rect,
 
     nodes: SlotMap<ViewId, Node>,
@@ -96,7 +98,7 @@ impl Tree {
         Self {
             root,
             focus: root,
-            // fullscreen: false,
+            zoomed: false,
             area,
             nodes,
             stack: Vec::new(),
@@ -269,6 +271,24 @@ impl Tree {
         self.recalculate()
     }
 
+    /// Returns whether the focused view is currently zoomed (maximized).
+    pub fn is_zoomed(&self) -> bool {
+        self.zoomed
+    }
+
+    /// Toggles zoom (maximize) for the currently focused view. Does nothing
+    /// and returns `false` if there are fewer than two views, since zooming
+    /// only makes sense when the screen is split. Returns `true` if the zoom
+    /// state was toggled.
+    pub fn toggle_zoom(&mut self) -> bool {
+        if self.views().count() < 2 {
+            return false;
+        }
+        self.zoomed = !self.zoomed;
+        self.recalculate();
+        true
+    }
+
     pub fn views(&self) -> impl Iterator<Item = (&View, bool)> {
         let focus = self.focus;
         self.nodes.iter().filter_map(move |(key, node)| match node {
@@ -357,6 +377,21 @@ impl Tree {
             // There are no more views, so the tree should focus itself again.
             self.focus = self.root;
 
+            return;
+        }
+
+        // Zooming only makes sense when there is more than one window; if a
+        // split was closed while zoomed and only one view remains, clear it.
+        if self.zoomed && self.views().count() < 2 {
+            self.zoomed = false;
+        }
+
+        if self.zoomed {
+            // Give the focused view the whole tree area and leave the other
+            // views' areas untouched (they aren't rendered while zoomed).
+            if let Content::View(view) = &mut self.nodes[self.focus].content {
+                view.area = self.area;
+            }
             return;
         }
 
@@ -964,5 +999,44 @@ mod test {
                 .map(|(view, _)| view.area.width)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn toggle_zoom() {
+        let area = Rect::new(0, 0, 180, 80);
+        let mut tree = Tree::new(area);
+        let mut view = View::new(DocumentId::default(), GutterConfig::default());
+        view.area = area;
+        tree.insert(view);
+
+        // Zooming with a single view is a no-op.
+        assert!(!tree.is_zoomed());
+        assert!(!tree.toggle_zoom());
+        assert!(!tree.is_zoomed());
+
+        let view = View::new(DocumentId::default(), GutterConfig::default());
+        tree.split(view, Layout::Vertical);
+        assert_eq!(2, tree.views().count());
+
+        let focus = tree.focus;
+        let unzoomed_area = tree.get(focus).area;
+        assert_ne!(area, unzoomed_area);
+
+        // Zooming gives the focused view the whole tree area.
+        assert!(tree.toggle_zoom());
+        assert!(tree.is_zoomed());
+        assert_eq!(area, tree.get(focus).area);
+
+        // Unzooming restores the split areas.
+        assert!(tree.toggle_zoom());
+        assert!(!tree.is_zoomed());
+        assert_eq!(unzoomed_area, tree.get(focus).area);
+
+        // Closing splits down to a single view auto-clears zoom.
+        assert!(tree.toggle_zoom());
+        assert!(tree.is_zoomed());
+        let other = tree.views().find(|(_, focus)| !focus).unwrap().0.id;
+        tree.remove(other);
+        assert!(!tree.is_zoomed());
     }
 }

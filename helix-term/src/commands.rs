@@ -551,6 +551,7 @@ impl MappableCommand {
         vsplit_new, "Vertical right split scratch buffer",
         wclose, "Close window",
         wonly, "Close windows except current",
+        toggle_zoom, "Toggle zoom for current window",
         select_register, "Select register",
         insert_register, "Insert register",
         copy_between_registers, "Copy between two registers",
@@ -6031,6 +6032,13 @@ fn wonly(cx: &mut Context) {
         if !focus {
             cx.editor.close(view_id);
         }
+    }
+}
+
+fn toggle_zoom(cx: &mut Context) {
+    if !cx.editor.tree.toggle_zoom() {
+        cx.editor
+            .set_status("Cannot zoom window: no other windows open");
     }
 }
 
