@@ -282,6 +282,7 @@ This layer is similar to Vim keybindings as Kakoune does not support windows.
 | `J`                    | Swap window downwards                                | `swap_view_down`  |
 | `K`                    | Swap window upwards                                  | `swap_view_up`    |
 | `L`                    | Swap window to the right                             | `swap_view_right` |
+| `z`                    | Toggle zoom (maximize) for the current window        | `toggle_zoom`     |
 | `ns`, `nCtrl-s`        | New horizontal split with a scratch buffer           | `hsplit_new`      |
 | `nv`, `nCtrl-v`        | New vertical split with a scratch buffer             | `vsplit_new`      |
 
