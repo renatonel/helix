@@ -313,6 +313,22 @@ impl Tree {
             })
     }
 
+    /// The views that are currently on screen, in visual (depth-first tree)
+    /// order, paired with whether they are focused.
+    ///
+    /// This is the view set that rendering and mouse hit-testing must both
+    /// operate on. While a view is zoomed it fills the whole tree area, but
+    /// the hidden views keep their split rects, which geometrically overlap
+    /// it, so they must not be rendered and must not receive mouse events
+    /// either.
+    pub fn visible_views(&self) -> impl Iterator<Item = (&View, bool)> {
+        let focus = self.focus;
+        let zoomed = self.zoomed;
+        self.traverse()
+            .map(move |(id, view)| (view, id == focus))
+            .filter(move |(_, is_focused)| !zoomed || *is_focused)
+    }
+
     /// Get reference to a [View] by index.
     /// # Panics
     ///
@@ -384,15 +400,6 @@ impl Tree {
         // split was closed while zoomed and only one view remains, clear it.
         if self.zoomed && self.views().count() < 2 {
             self.zoomed = false;
-        }
-
-        if self.zoomed {
-            // Give the focused view the whole tree area and leave the other
-            // views' areas untouched (they aren't rendered while zoomed).
-            if let Content::View(view) = &mut self.nodes[self.focus].content {
-                view.area = self.area;
-            }
-            return;
         }
 
         self.stack.push((self.root, self.area));
@@ -472,6 +479,16 @@ impl Tree {
                         }
                     }
                 }
+            }
+        }
+
+        if self.zoomed {
+            // The focused view is maximized to fill the whole tree area. The
+            // other views keep their split areas so that the tree geometry
+            // stays meaningful, but they are neither rendered nor
+            // hit-testable while zoomed (see `visible_views`).
+            if let Content::View(view) = &mut self.nodes[self.focus].content {
+                view.area = self.area;
             }
         }
     }
@@ -636,6 +653,10 @@ impl Tree {
         let target = self.find_split_in_direction(focus, direction)?;
         let focus_parent = self.nodes[focus].parent;
         let target_parent = self.nodes[target].parent;
+        // While zoomed the focused view fills the whole tree area and the
+        // hidden views keep their split areas, so swapping the areas would
+        // shrink the zoomed view down to a split rect.
+        let zoomed = self.zoomed;
 
         if focus_parent == target_parent {
             let parent = focus_parent;
@@ -655,7 +676,9 @@ impl Tree {
                     parent.children[focus_pos] = target_view.id;
                     parent.children[target_pos] = focus_view.id;
                     // swap area so that views rendered at the correct location
-                    std::mem::swap(&mut focus_view.area, &mut target_view.area);
+                    if !zoomed {
+                        std::mem::swap(&mut focus_view.area, &mut target_view.area);
+                    }
 
                     Some(())
                 }
@@ -692,7 +715,9 @@ impl Tree {
                     );
                     std::mem::swap(&mut focus.parent, &mut target.parent);
                     // swap area so that views rendered at the correct location
-                    std::mem::swap(&mut focus_view.area, &mut target_view.area);
+                    if !zoomed {
+                        std::mem::swap(&mut focus_view.area, &mut target_view.area);
+                    }
 
                     Some(())
                 }
@@ -760,8 +785,30 @@ impl DoubleEndedIterator for Traverse<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::editor::GutterConfig;
+    use crate::document::Document;
+    use crate::editor::{Config, GutterConfig};
     use crate::DocumentId;
+
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwap;
+    use helix_core::{syntax, Rope};
+
+    /// A document with one word per line, laid out so that any non-gutter
+    /// screen row maps to a distinct character offset.
+    fn test_document(view_ids: &[ViewId]) -> Document {
+        let rope = Rope::from_str("zero\none\ntwo\nthree\n");
+        let mut doc = Document::from(
+            rope,
+            None,
+            Arc::new(ArcSwap::new(Arc::new(Config::default()))),
+            Arc::new(ArcSwap::from_pointee(syntax::Loader::default())),
+        );
+        for &id in view_ids {
+            doc.ensure_view_init(id);
+        }
+        doc
+    }
 
     #[test]
     fn find_split_in_direction() {
@@ -1026,11 +1073,14 @@ mod test {
         assert!(tree.toggle_zoom());
         assert!(tree.is_zoomed());
         assert_eq!(area, tree.get(focus).area);
+        assert_eq!(1, tree.visible_views().count());
+        assert_eq!(focus, tree.visible_views().next().unwrap().0.id);
 
         // Unzooming restores the split areas.
         assert!(tree.toggle_zoom());
         assert!(!tree.is_zoomed());
         assert_eq!(unzoomed_area, tree.get(focus).area);
+        assert_eq!(2, tree.visible_views().count());
 
         // Closing splits down to a single view auto-clears zoom.
         assert!(tree.toggle_zoom());
@@ -1038,5 +1088,97 @@ mod test {
         let other = tree.views().find(|(_, focus)| !focus).unwrap().0.id;
         tree.remove(other);
         assert!(!tree.is_zoomed());
+        assert_eq!(1, tree.visible_views().count());
+    }
+
+    /// While a view is zoomed it covers the whole tree area, but the hidden
+    /// views keep their split rects, which geometrically overlap it. Hit-testing
+    /// must therefore only consider the zoomed view, otherwise a click lands on
+    /// an invisible window and moves focus to it.
+    #[test]
+    fn zoomed_view_owns_hit_testing() {
+        let area = Rect::new(0, 0, 180, 80);
+        let mut tree = Tree::new(area);
+        let mut view = View::new(DocumentId::default(), GutterConfig::default());
+        view.area = area;
+        tree.insert(view);
+        let left = tree.focus;
+
+        let view = View::new(DocumentId::default(), GutterConfig::default());
+        tree.split(view, Layout::Vertical);
+        let right = tree.focus;
+
+        let doc = test_document(&[left, right]);
+
+        // A vertical split of an 180-wide area with no gap gives 90 columns to
+        // the left view and 89 to the right one.
+        let left_split_area = Rect::new(0, 0, 90, 80);
+        assert_eq!(left_split_area, tree.get(left).area);
+
+        // Unzoomed, the two views own disjoint areas and (row, column) inside
+        // the left one resolves to the left view.
+        let hit = |tree: &Tree, row, column| {
+            tree.visible_views()
+                .find_map(|(view, _)| {
+                    view.pos_at_screen_coords(&doc, row, column, true)
+                        .map(|pos| (pos, view.id))
+                })
+                .map(|(_, id)| id)
+        };
+        assert_eq!(Some(left), hit(&tree, 1, 10));
+
+        assert!(tree.toggle_zoom());
+        assert_eq!(area, tree.get(right).area);
+        // The hidden view keeps its split area, so it still geometrically
+        // covers (1, 10) -- `views()` alone is not enough to hit-test with.
+        assert_eq!(left_split_area, tree.get(left).area);
+        assert!(tree.get(left).area.intersects(tree.get(right).area));
+
+        // But it is not visible, so it is neither rendered nor hit-testable.
+        assert_eq!(1, tree.visible_views().count());
+
+        // A click inside the zoomed view's area resolves to the zoomed view,
+        // even where it overlaps the hidden view's split area.
+        assert_eq!(Some(right), hit(&tree, 1, 10));
+        assert_eq!(Some(right), hit(&tree, 78, 179));
+
+        // Unzooming restores per-view hit-testing.
+        assert!(tree.toggle_zoom());
+        assert_eq!(Some(left), hit(&tree, 1, 10));
+        assert_eq!(Some(right), hit(&tree, 1, 100));
+    }
+
+    /// Resizing while zoomed must still lay out the hidden views, so that the
+    /// areas used for split navigation describe the current terminal size
+    /// rather than the size from before the zoom.
+    #[test]
+    fn zoom_survives_resize_without_stale_areas() {
+        let mut tree = Tree::new(Rect::new(0, 0, 180, 80));
+        let mut view = View::new(DocumentId::default(), GutterConfig::default());
+        view.area = Rect::new(0, 0, 180, 80);
+        tree.insert(view);
+        let left = tree.focus;
+
+        let view = View::new(DocumentId::default(), GutterConfig::default());
+        tree.split(view, Layout::Vertical);
+        let right = tree.focus;
+
+        assert!(tree.toggle_zoom());
+        assert_eq!(Rect::new(0, 0, 180, 80), tree.get(right).area);
+
+        tree.resize(Rect::new(0, 0, 180, 100));
+
+        // The zoomed view follows the new area...
+        assert!(tree.is_zoomed());
+        assert_eq!(Rect::new(0, 0, 180, 100), tree.get(right).area);
+        // ...and so does the hidden view, which is not left describing the
+        // pre-resize 80-row terminal.
+        assert_eq!(Rect::new(0, 0, 90, 100), tree.get(left).area);
+
+        // Swapping a split while zoomed must not shrink the zoomed view down
+        // to a split rect by swapping its area with the hidden view's.
+        assert!(tree.swap_split_in_direction(Direction::Left).is_some());
+        assert_eq!(Rect::new(0, 0, 180, 100), tree.get(right).area);
+        assert_eq!(Rect::new(0, 0, 90, 100), tree.get(left).area);
     }
 }
